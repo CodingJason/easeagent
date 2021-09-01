@@ -47,6 +47,7 @@ import static net.bytebuddy.matcher.ElementMatchers.*;
 @Injection.Provider(Provider.class)
 public abstract class ServiceNamePropagationAdvice implements Transformation {
     public static final String FeignLoadBalancer = "org.springframework.cloud.openfeign.ribbon.FeignLoadBalancer";
+    public static final String LoadBalancerFeignClient = "org.springframework.cloud.openfeign.ribbon.LoadBalancerFeignClient";
     public static final String FeignBlockingLoadBalancerClient = "org.springframework.cloud.openfeign.loadbalancer.FeignBlockingLoadBalancerClient";
     public static final String RetryLoadBalancerInterceptor = "org.springframework.cloud.client.loadbalancer.RetryLoadBalancerInterceptor";
     public static final String AsyncLoadBalancerInterceptor = "org.springframework.cloud.client.loadbalancer.AsyncLoadBalancerInterceptor";
@@ -59,9 +60,17 @@ public abstract class ServiceNamePropagationAdvice implements Transformation {
 
     @Override
     public <T extends Definition> T define(Definition<T> def) {
-        return def.type(named(FeignLoadBalancer))
+        return def
                 // OpenFeign
-                .transform(feignLoadBalancerExecute(named("execute").and(takesArguments(2))
+                .type(named(LoadBalancerFeignClient))
+                .transform(loadBalancerFeignClientExecute(named("getClientConfig")
+                        .and(takesArguments(2))
+                        .and(takesArgument(0,named("feign.Request$Options")))
+                        .and(takesArgument(1, named("java.lang.String")))
+                ))
+                .type(named(FeignLoadBalancer))
+                .transform(feignLoadBalancerExecute(named("execute")
+                        .and(takesArguments(2))
                         .and(takesArgument(0, named(FeignLoadBalancer + "$RibbonRequest")))
                         .and(takesArgument(1, named("com.netflix.client.config.IClientConfig")))
                 ))
@@ -87,6 +96,10 @@ public abstract class ServiceNamePropagationAdvice implements Transformation {
                 .end();
     }
 
+
+    @AdviceTo(ServiceNamePropagationAdvice.LoadBalancerFeignClientExecute.class)
+    abstract Definition.Transformer loadBalancerFeignClientExecute(ElementMatcher<? super MethodDescription> matcher);
+
     @AdviceTo(ServiceNamePropagationAdvice.FeignLoadBalancerExecute.class)
     abstract Definition.Transformer feignLoadBalancerExecute(ElementMatcher<? super MethodDescription> matcher);
 
@@ -101,6 +114,36 @@ public abstract class ServiceNamePropagationAdvice implements Transformation {
 
     @AdviceTo(ServiceNamePropagationAdvice.FilteringWebHandlerHandle.class)
     abstract Definition.Transformer filteringWebHandlerHandle(ElementMatcher<? super MethodDescription> matcher);
+
+
+    static class LoadBalancerFeignClientExecute {
+        private final Logger logger = LoggerFactory.getLogger(getClass());
+        private final CrossThreadPropagationConfig config;
+
+        @Injection.Autowire
+        public LoadBalancerFeignClientExecute(CrossThreadPropagationConfig config) {
+            this.config = config;
+        }
+
+        @SuppressWarnings("unchecked")
+        @Advice.OnMethodExit
+        void exit(@Advice.Origin("#m") String method,
+                @Advice.AllArguments Object[] args,
+                @Advice.Return(readOnly = false, typing = Assigner.Typing.DYNAMIC) Object retValue) {
+            try {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("exit method [{}]", method);
+                }
+                Object clientName = ReflectionTool.invokeMethod(retValue, "getClientName");
+                if(clientName == null){
+                    clientName = args[1];
+                    ReflectionTool.invokeMethod(retValue,"setClientName", clientName);
+                }
+            } catch (Throwable e) {
+                logger.warn("intercept method [{}] failure", method, e);
+            }
+        }
+    }
 
 
     static class FeignLoadBalancerExecute {
